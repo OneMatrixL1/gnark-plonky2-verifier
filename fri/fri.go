@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"os"
 
 	"github.com/consensys/gnark-crypto/field/goldilocks"
 	"github.com/consensys/gnark/frontend"
@@ -18,21 +19,27 @@ type Chip struct {
 	api               frontend.API             `gnark:"-"`
 	gl                *gl.Chip                 `gnark:"-"`
 	poseidonBN254Chip *poseidon.BN254Chip      `gnark:"-"`
+	poseidonGLChip    *poseidon.GoldilocksChip `gnark:"-"`
 	commonData        *types.CommonCircuitData `gnark:"-"`
 	friParams         *types.FriParams         `gnark:"-"`
+	hashMode          types.HashMode           `gnark:"-"`
 }
 
 func NewChip(
 	api frontend.API,
 	commonData *types.CommonCircuitData,
 	friParams *types.FriParams,
+	hashMode types.HashMode,
 ) *Chip {
 	poseidonBN254Chip := poseidon.NewBN254Chip(api)
+	poseidonGLChip := poseidon.NewGoldilocksChip(api)
 	return &Chip{
 		api:               api,
 		poseidonBN254Chip: poseidonBN254Chip,
+		poseidonGLChip:    poseidonGLChip,
 		commonData:        commonData,
 		friParams:         friParams,
+		hashMode:          hashMode,
 		gl:                gl.New(api),
 	}
 }
@@ -67,8 +74,21 @@ func (f *Chip) ToOpenings(c variables.OpeningSet) Openings {
 	values = append(values, c.PlonkZs...)         // num_challenges
 	values = append(values, c.PartialProducts...) // num_challenges * num_partial_products
 	values = append(values, c.QuotientPolys...)   // num_challenges * quotient_degree_factor
+
+	// Add lookup openings if present (v1.1.0+)
+	if len(c.LookupZs) > 0 {
+		values = append(values, c.LookupZs...) // num_challenges * num_lookup_polys
+	}
+
 	zetaBatch := OpeningBatch{Values: values}
-	zetaNextBatch := OpeningBatch{Values: c.PlonkZsNext}
+
+	// Combine PlonkZsNext and LookupZsNext for the zeta_next batch
+	zetaNextValues := c.PlonkZsNext
+	if len(c.LookupZsNext) > 0 {
+		zetaNextValues = append(zetaNextValues, c.LookupZsNext...)
+	}
+	zetaNextBatch := OpeningBatch{Values: zetaNextValues}
+
 	return Openings{Batches: []OpeningBatch{zetaBatch, zetaNextBatch}}
 }
 
@@ -94,6 +114,63 @@ func (f *Chip) fromOpeningsAndAlpha(
 	return reducedOpenings
 }
 
+// selectHash selects between two GoldilocksHashOut based on a bit
+// if bit == 1, returns a; otherwise returns b
+// bn254HashToChunks converts a BN254 hash (single field element) to 4 u64 chunks
+// This matches the Rust serialization which splits 32 bytes into 4×8 bytes
+func (f *Chip) bn254HashToChunks(bn254Hash poseidon.BN254HashOut) poseidon.GoldilocksHashOut {
+	// Convert BN254 hash to bits
+	bits := f.api.ToBinary(bn254Hash, 256)
+
+	// Split into 4 chunks of 64 bits each
+	var result poseidon.GoldilocksHashOut
+	for i := 0; i < 4; i++ {
+		start := i * 64
+		end := start + 64
+		chunk := bits[start:end]
+		result[i] = gl.NewVariable(f.api.FromBinary(chunk...))
+	}
+
+	return result
+}
+
+// chunksToB N254Hash reconstructs a BN254 hash from 4 u64 chunks
+func (f *Chip) chunksToBN254Hash(chunks poseidon.GoldilocksHashOut) poseidon.BN254HashOut {
+	// Convert each chunk to 64 bits and combine
+	var allBits []frontend.Variable
+	for i := 0; i < 4; i++ {
+		chunkBits := f.api.ToBinary(chunks[i].Limb, 64)
+		allBits = append(allBits, chunkBits...)
+	}
+
+	// Reconstruct as BN254 field element
+	return f.api.FromBinary(allBits...)
+}
+
+func (f *Chip) selectHash(bit frontend.Variable, a, b poseidon.GoldilocksHashOut) poseidon.GoldilocksHashOut {
+	var result poseidon.GoldilocksHashOut
+	for i := 0; i < 4; i++ {
+		result[i] = gl.Variable{Limb: f.api.Select(bit, a[i].Limb, b[i].Limb)}
+	}
+	return result
+}
+
+// lookup2Hash does a 4-way lookup for GoldilocksHashOut based on 2 bits
+func (f *Chip) lookup2Hash(b0, b1 frontend.Variable, h0, h1, h2, h3 poseidon.GoldilocksHashOut) poseidon.GoldilocksHashOut {
+	var result poseidon.GoldilocksHashOut
+	for i := 0; i < 4; i++ {
+		result[i] = gl.Variable{Limb: f.api.Lookup2(b0, b1, h0[i].Limb, h1[i].Limb, h2[i].Limb, h3[i].Limb)}
+	}
+	return result
+}
+
+// assertHashEqual asserts two GoldilocksHashOut are equal
+func (f *Chip) assertHashEqual(a, b poseidon.GoldilocksHashOut) {
+	for i := 0; i < 4; i++ {
+		f.gl.AssertIsEqual(a[i], b[i])
+	}
+}
+
 func (f *Chip) verifyMerkleProofToCapWithCapIndex(
 	leafData []gl.Variable,
 	leafIndexBits []frontend.Variable,
@@ -101,18 +178,70 @@ func (f *Chip) verifyMerkleProofToCapWithCapIndex(
 	merkleCap variables.FriMerkleCap,
 	proof *variables.FriMerkleProof,
 ) {
-	currentDigest := f.poseidonBN254Chip.HashOrNoop(leafData)
+	debugFRIMerkle := os.Getenv("DEBUG_FRI_MERKLE") == "1"
+	var currentDigest poseidon.GoldilocksHashOut
+
+	if debugFRIMerkle {
+		fmt.Printf("\n=== verifyMerkleProofToCapWithCapIndex ===\n")
+		fmt.Printf("leafData length: %d\n", len(leafData))
+		fmt.Printf("Number of siblings: %d\n", len(proof.Siblings))
+		fmt.Printf("hashMode: %v\n", f.hashMode)
+	}
+
+	// Use hash mode to determine which Poseidon implementation to use
+	if f.hashMode == types.HashModePoseidonBN254 {
+		// In BN254 mode, hash the leafData using BN254 Poseidon, then convert to 4 u64 chunks
+		// leafData contains Goldilocks evaluations, NOT a pre-computed hash
+		bn254Hash := f.poseidonBN254Chip.HashOrNoop(leafData)
+		currentDigest = f.bn254HashToChunks(bn254Hash)
+		if debugFRIMerkle {
+			fmt.Printf("Initial leaf hash (BN254 mode, 4 chunks): [%v, %v, %v, %v]\n",
+				currentDigest[0].Limb, currentDigest[1].Limb, currentDigest[2].Limb, currentDigest[3].Limb)
+		}
+	} else {
+		// Use Goldilocks Poseidon (emulated, ~5000 constraints/hash)
+		currentDigest = f.poseidonGLChip.HashOrNoop(leafData)
+	}
+
 	for i, sibling := range proof.Siblings {
 		bit := leafIndexBits[i]
 
-		var inputs poseidon.BN254State
-		inputs[0] = frontend.Variable(0)
-		inputs[1] = frontend.Variable(0)
-		inputs[2] = f.api.Select(bit, sibling, currentDigest)
-		inputs[3] = f.api.Select(bit, currentDigest, sibling)
-		state := f.poseidonBN254Chip.Poseidon(inputs)
+		if debugFRIMerkle {
+			fmt.Printf("\n--- Merkle step %d ---\n", i)
+			fmt.Printf("  leafIndexBit[%d] = %v\n", i, bit)
+			fmt.Printf("  sibling[%d]: [%v, %v, %v, %v]\n", i,
+				sibling[0].Limb, sibling[1].Limb, sibling[2].Limb, sibling[3].Limb)
+			fmt.Printf("  current: [%v, %v, %v, %v]\n",
+				currentDigest[0].Limb, currentDigest[1].Limb, currentDigest[2].Limb, currentDigest[3].Limb)
+		}
 
-		currentDigest = state[0]
+		// Select left/right based on bit: if bit=1, current goes right; else current goes left
+		left := f.selectHash(bit, sibling, currentDigest)
+		right := f.selectHash(bit, currentDigest, sibling)
+
+		if debugFRIMerkle {
+			fmt.Printf("  left (after select): [%v, %v, %v, %v]\n",
+				left[0].Limb, left[1].Limb, left[2].Limb, left[3].Limb)
+			fmt.Printf("  right (after select): [%v, %v, %v, %v]\n",
+				right[0].Limb, right[1].Limb, right[2].Limb, right[3].Limb)
+		}
+
+		// Hash the two children to get parent
+		if f.hashMode == types.HashModePoseidonBN254 {
+			// Reconstruct BN254 hashes from chunks
+			leftBN254 := f.chunksToBN254Hash(left)
+			rightBN254 := f.chunksToBN254Hash(right)
+			// Hash the two BN254 values using BN254 TwoToOne
+			bn254Hash := f.poseidonBN254Chip.TwoToOne(leftBN254, rightBN254)
+			// Convert back to 4 u64 chunks
+			currentDigest = f.bn254HashToChunks(bn254Hash)
+			if debugFRIMerkle {
+				fmt.Printf("  parent (TwoToOne result): [%v, %v, %v, %v]\n",
+					currentDigest[0].Limb, currentDigest[1].Limb, currentDigest[2].Limb, currentDigest[3].Limb)
+			}
+		} else {
+			currentDigest = f.poseidonGLChip.TwoToOne(left, right)
+		}
 	}
 
 	// We assume that the cap_height is 4.  Create two levels of the Lookup2 circuit
@@ -126,21 +255,36 @@ func (f *Chip) verifyMerkleProofToCapWithCapIndex(
 	}
 
 	const NUM_LEAF_LOOKUPS = 4
-	// Each lookup gadget will connect to 4 merkleCap entries
 	const STRIDE_LENGTH = 4
-	var leafLookups [NUM_LEAF_LOOKUPS]poseidon.BN254HashOut
-	// First create the "leaf" lookup2 circuits
-	// This will use the least significant bits of the capIndexBits array
+
+	var leafLookups [NUM_LEAF_LOOKUPS]poseidon.GoldilocksHashOut
+	// First create the "leaf" lookup2 circuits using least significant bits
 	for i := 0; i < NUM_LEAF_LOOKUPS; i++ {
-		leafLookups[i] = f.api.Lookup2(
+		leafLookups[i] = f.lookup2Hash(
 			capIndexBits[0], capIndexBits[1],
-			merkleCap[i*STRIDE_LENGTH], merkleCap[i*STRIDE_LENGTH+1], merkleCap[i*STRIDE_LENGTH+2], merkleCap[i*STRIDE_LENGTH+3],
+			merkleCap[i*STRIDE_LENGTH], merkleCap[i*STRIDE_LENGTH+1],
+			merkleCap[i*STRIDE_LENGTH+2], merkleCap[i*STRIDE_LENGTH+3],
 		)
 	}
 
-	// Use the most 2 significant bits of the capIndexBits array for the "root" lookup
-	merkleCapEntry := f.api.Lookup2(capIndexBits[2], capIndexBits[3], leafLookups[0], leafLookups[1], leafLookups[2], leafLookups[3])
-	f.api.AssertIsEqual(currentDigest, merkleCapEntry)
+	// Use the most 2 significant bits for the "root" lookup
+	merkleCapEntry := f.lookup2Hash(capIndexBits[2], capIndexBits[3], leafLookups[0], leafLookups[1], leafLookups[2], leafLookups[3])
+
+	if debugFRIMerkle {
+		fmt.Printf("\n--- Final comparison ---\n")
+		fmt.Printf("  capIndexBits: [%v, %v, %v, %v]\n", capIndexBits[0], capIndexBits[1], capIndexBits[2], capIndexBits[3])
+		fmt.Printf("  currentDigest (computed): [%v, %v, %v, %v]\n",
+			currentDigest[0].Limb, currentDigest[1].Limb, currentDigest[2].Limb, currentDigest[3].Limb)
+		fmt.Printf("  merkleCapEntry (expected): [%v, %v, %v, %v]\n",
+			merkleCapEntry[0].Limb, merkleCapEntry[1].Limb, merkleCapEntry[2].Limb, merkleCapEntry[3].Limb)
+		fmt.Printf("  First few cap entries:\n")
+		for i := 0; i < 4 && i < len(merkleCap); i++ {
+			fmt.Printf("    cap[%d]: [%v, %v, %v, %v]\n", i,
+				merkleCap[i][0].Limb, merkleCap[i][1].Limb, merkleCap[i][2].Limb, merkleCap[i][3].Limb)
+		}
+	}
+
+	f.assertHashEqual(currentDigest, merkleCapEntry)
 }
 
 func (f *Chip) verifyInitialProof(xIndexBits []frontend.Variable, proof *variables.FriInitialTreeProof, initialMerkleCaps []variables.FriMerkleCap, capIndexBits []frontend.Variable) {
@@ -188,21 +332,58 @@ func (f *Chip) calculateSubgroupX(
 	xIndexBits []frontend.Variable,
 	nLog uint64,
 ) gl.Variable {
+	debugEnabled := os.Getenv("DEBUG_FRI_TRACE") != ""
+
 	// Compute x from its index
 	// `subgroup_x` is `subgroup[x_index]`, i.e., the actual field element in the domain.
 	// OPTIMIZE - Make these as global values
 	g := gl.NewVariable(gl.MULTIPLICATIVE_GROUP_GENERATOR.Uint64())
 	base := gl.PrimitiveRootOfUnity(nLog)
 
-	// Create a reverse list of xIndexBits
-	xIndexBitsRev := make([]frontend.Variable, 0)
-	for i := len(xIndexBits) - 1; i >= 0; i-- {
-		xIndexBitsRev = append(xIndexBitsRev, xIndexBits[i])
+	// Reverse the bits to match Rust's reverse_bits(x_index, log_n)
+	// xIndexBits are in little-endian (LSB first), we need to reverse them
+	reversedBits := make([]frontend.Variable, len(xIndexBits))
+	for i := 0; i < len(xIndexBits); i++ {
+		reversedBits[i] = xIndexBits[len(xIndexBits)-1-i]
 	}
 
-	product := f.expFromBitsConstBase(base, xIndexBitsRev)
+	if debugEnabled {
+		fmt.Printf("\n  === calculateSubgroupX ===\n")
+		fmt.Printf("    nLog: %d\n", nLog)
+		fmt.Printf("    g (generator): %d\n", gl.MULTIPLICATIVE_GROUP_GENERATOR.Uint64())
+		fmt.Printf("    base (ω_%d): %d\n", 1<<nLog, base.Uint64())
+		fmt.Printf("    xIndexBits (original): [")
+		for i := 0; i < len(xIndexBits) && i < 10; i++ {
+			fmt.Printf("%v", xIndexBits[i])
+			if i < len(xIndexBits)-1 && i < 9 {
+				fmt.Printf(", ")
+			}
+		}
+		fmt.Printf("]\n")
+		fmt.Printf("    reversedBits: [")
+		for i := 0; i < len(reversedBits) && i < 10; i++ {
+			fmt.Printf("%v", reversedBits[i])
+			if i < len(reversedBits)-1 && i < 9 {
+				fmt.Printf(", ")
+			}
+		}
+		fmt.Printf("]\n")
+	}
 
-	return f.gl.Mul(g, product)
+	// Use reversed bits to compute base^(reverse_bits(xIndex))
+	product := f.expFromBitsConstBase(base, reversedBits)
+
+	if debugEnabled {
+		fmt.Printf("    product (base^xIndex): %v\n", product.Limb)
+	}
+
+	result := f.gl.Mul(g, product)
+
+	if debugEnabled {
+		fmt.Printf("    result (g * product): %v\n", result.Limb)
+	}
+
+	return result
 }
 
 func (f *Chip) friCombineInitial(
@@ -212,10 +393,17 @@ func (f *Chip) friCombineInitial(
 	subgroupX_QE gl.QuadraticExtensionVariable,
 	precomputedReducedEval []gl.QuadraticExtensionVariable,
 ) gl.QuadraticExtensionVariable {
+	debugEnabled := os.Getenv("DEBUG_FRI_TRACE") != ""
 	sum := gl.ZeroExtension()
 
 	if len(instance.Batches) != len(precomputedReducedEval) {
 		panic("len(openings) != len(precomputedReducedEval)")
+	}
+
+	if debugEnabled {
+		fmt.Println("\n  === friCombineInitial ===")
+		fmt.Printf("    num batches: %d\n", len(instance.Batches))
+		fmt.Printf("    subgroupX_QE: [%v, %v]\n", subgroupX_QE[0].Limb, subgroupX_QE[1].Limb)
 	}
 
 	for i := 0; i < len(instance.Batches); i++ {
@@ -224,37 +412,81 @@ func (f *Chip) friCombineInitial(
 
 		point := batch.Point
 		evals := make([]gl.QuadraticExtensionVariable, 0)
-		for _, polynomial := range batch.Polynomials {
+		for j, polynomial := range batch.Polynomials {
+			eval_value := proof.EvalsProofs[polynomial.OracleIndex].Elements[polynomial.PolynomialInfo]
 			evals = append(
 				evals,
 				gl.QuadraticExtensionVariable{
-					proof.EvalsProofs[polynomial.OracleIndex].Elements[polynomial.PolynomialInfo],
+					eval_value,
 					gl.Zero(),
 				},
 			)
+			if debugEnabled && i == 0 && j < 5 {
+				fmt.Printf("      polynomial[%d]: OracleIndex=%d, PolynomialInfo=%d, Elements[%d]=%v\n",
+					j, polynomial.OracleIndex, polynomial.PolynomialInfo, polynomial.PolynomialInfo, eval_value.Limb)
+			}
+		}
+
+		if debugEnabled && i == 0 {
+			fmt.Printf("      First 5 evals:\n")
+			for j := 0; j < 5 && j < len(evals); j++ {
+				fmt.Printf("        evals[%d]: [%v, %v]\n", j, evals[j][0].Limb, evals[j][1].Limb)
+			}
 		}
 
 		reducedEvals := f.gl.ReduceWithPowers(evals, friAlpha)
-		numerator := f.gl.SubExtensionNoReduce(reducedEvals, reducedOpenings)
+		numerator := f.gl.SubExtension(reducedEvals, reducedOpenings)
 		denominator := f.gl.SubExtension(subgroupX_QE, point)
 		sum = f.gl.MulExtension(f.gl.ExpExtension(friAlpha, uint64(len(evals))), sum)
 		inv, hasInv := f.gl.InverseExtension(denominator)
 		f.api.AssertIsEqual(hasInv, frontend.Variable(1))
+
+		if debugEnabled {
+			fmt.Printf("    batch[%d]:\n", i)
+			fmt.Printf("      point: [%v, %v]\n", point[0].Limb, point[1].Limb)
+			fmt.Printf("      num evals: %d\n", len(evals))
+			fmt.Printf("      reducedEvals: [%v, %v]\n", reducedEvals[0].Limb, reducedEvals[1].Limb)
+			fmt.Printf("      reducedOpenings: [%v, %v]\n", reducedOpenings[0].Limb, reducedOpenings[1].Limb)
+			fmt.Printf("      numerator: [%v, %v]\n", numerator[0].Limb, numerator[1].Limb)
+			fmt.Printf("      denominator: [%v, %v]\n", denominator[0].Limb, denominator[1].Limb)
+			fmt.Printf("      inv: [%v, %v]\n", inv[0].Limb, inv[1].Limb)
+		}
+
 		sum = f.gl.MulAddExtension(
 			numerator,
 			inv,
 			sum,
 		)
+
+		if debugEnabled {
+			fmt.Printf("      sum after batch: [%v, %v]\n", sum[0].Limb, sum[1].Limb)
+		}
 	}
 
 	return sum
 }
 
 func (f *Chip) finalPolyEval(finalPoly variables.PolynomialCoeffs, point gl.QuadraticExtensionVariable) gl.QuadraticExtensionVariable {
+	debugEnabled := os.Getenv("DEBUG_FRI_TRACE") != ""
 	ret := gl.ZeroExtension()
+
+	if debugEnabled {
+		fmt.Printf("\n  === finalPolyEval ===\n")
+		fmt.Printf("    point: [%v, %v]\n", point[0].Limb, point[1].Limb)
+		fmt.Printf("    num coeffs: %d\n", len(finalPoly.Coeffs))
+	}
+
 	for i := len(finalPoly.Coeffs) - 1; i >= 0; i-- {
 		ret = f.gl.MulAddExtension(ret, point, finalPoly.Coeffs[i])
+		if debugEnabled && i < 3 {
+			fmt.Printf("    After coeff[%d]: ret = [%v, %v]\n", i, ret[0].Limb, ret[1].Limb)
+		}
 	}
+
+	if debugEnabled {
+		fmt.Printf("    final result: [%v, %v]\n", ret[0].Limb, ret[1].Limb)
+	}
+
 	return ret
 }
 
@@ -394,12 +626,39 @@ func (f *Chip) verifyQueryRound(
 	nLog uint64,
 	roundProof *variables.FriQueryRound,
 ) {
+	debugEnabled := os.Getenv("DEBUG_FRI_TRACE") != ""
+
+	if debugEnabled {
+		fmt.Println("\n=== FRI verifyQueryRound ===")
+		fmt.Printf("  xIndex (raw): %v\n", xIndex.Limb)
+		fmt.Printf("  n: %d, nLog: %d\n", n, nLog)
+		fmt.Printf("  Number of reduction_arity_bits: %d\n", len(f.friParams.ReductionArityBits))
+		fmt.Printf("  Reduction arity bits: %v\n", f.friParams.ReductionArityBits)
+	}
+
 	// Note assertNoncanonicalIndicesOK does not add any constraints, it's a sanity check on the config
 	assertNoncanonicalIndicesOK(*f.friParams)
 
 	xIndex = f.gl.Reduce(xIndex)
 	xIndexBits := f.api.ToBinary(xIndex.Limb, 64)[0 : f.friParams.DegreeBits+f.friParams.Config.RateBits]
 	capIndexBits := xIndexBits[len(xIndexBits)-int(f.friParams.Config.CapHeight):]
+
+	if debugEnabled {
+		fmt.Printf("  xIndex (after reduce): %v\n", xIndex.Limb)
+		fmt.Printf("  xIndexBits length: %d (degreeBits=%d + rateBits=%d)\n",
+			len(xIndexBits), f.friParams.DegreeBits, f.friParams.Config.RateBits)
+		// Print the first few bits
+		fmt.Printf("  xIndexBits (first 5): [")
+		for i := 0; i < 5 && i < len(xIndexBits); i++ {
+			fmt.Printf("%v", xIndexBits[i])
+			if i < 4 {
+				fmt.Printf(", ")
+			}
+		}
+		fmt.Printf("]\n")
+		fmt.Printf("  capHeight: %d, capIndexBits length: %d\n",
+			f.friParams.Config.CapHeight, len(capIndexBits))
+	}
 
 	f.verifyInitialProof(xIndexBits, &roundProof.InitialTreesProof, initialMerkleCaps, capIndexBits)
 
@@ -408,7 +667,16 @@ func (f *Chip) verifyQueryRound(
 		nLog,
 	)
 
+	if debugEnabled {
+		fmt.Printf("  subgroupX (calculated from xIndexBits): %v\n", subgroupX.Limb)
+	}
+
 	subgroupX_QE := subgroupX.ToQuadraticExtension()
+
+	if debugEnabled {
+		fmt.Printf("  subgroupX_QE: [%v, %v]\n", subgroupX_QE[0].Limb, subgroupX_QE[1].Limb)
+		fmt.Printf("  FriAlpha: [%v, %v]\n", challenges.FriAlpha[0].Limb, challenges.FriAlpha[1].Limb)
+	}
 
 	oldEval := f.friCombineInitial(
 		instance,
@@ -417,6 +685,11 @@ func (f *Chip) verifyQueryRound(
 		subgroupX_QE,
 		precomputedReducedEval,
 	)
+
+	if debugEnabled {
+		fmt.Printf("  Initial oldEval (after friCombineInitial): [%v, %v]\n", oldEval[0].Limb, oldEval[1].Limb)
+		fmt.Printf("  Number of FRI rounds: %d\n", len(f.friParams.ReductionArityBits))
+	}
 
 	for i, arityBits := range f.friParams.ReductionArityBits {
 		evals := roundProof.Steps[i].Evals
@@ -468,6 +741,10 @@ func (f *Chip) verifyQueryRound(
 			challenges.FriBetas[i],
 		)
 
+		if debugEnabled {
+			fmt.Printf("  After FRI round %d (arityBits=%d): oldEval = [%v, %v]\n", i, arityBits, oldEval[0].Limb, oldEval[1].Limb)
+		}
+
 		// Convert evals (array of QE) to fields by taking their 0th degree coefficients
 		fieldEvals := make([]gl.Variable, 0, 2*len(evals))
 		for j := 0; j < len(evals); j++ {
@@ -492,6 +769,18 @@ func (f *Chip) verifyQueryRound(
 
 	subgroupX_QE = subgroupX.ToQuadraticExtension()
 	finalPolyEval := f.finalPolyEval(proof.FinalPoly, subgroupX_QE)
+
+	if debugEnabled {
+		fmt.Println("\n  Final Check:")
+		fmt.Printf("    subgroupX: %v\n", subgroupX.Limb)
+		fmt.Printf("    subgroupX_QE: [%v, %v]\n", subgroupX_QE[0].Limb, subgroupX_QE[1].Limb)
+		fmt.Printf("    oldEval (computed): [%v, %v]\n", oldEval[0].Limb, oldEval[1].Limb)
+		fmt.Printf("    finalPolyEval (expected): [%v, %v]\n", finalPolyEval[0].Limb, finalPolyEval[1].Limb)
+		fmt.Printf("    finalPoly coeffs: %d coefficients\n", len(proof.FinalPoly.Coeffs))
+		for i, coeff := range proof.FinalPoly.Coeffs {
+			fmt.Printf("      coeff[%d]: [%v, %v]\n", i, coeff[0].Limb, coeff[1].Limb)
+		}
+	}
 
 	f.gl.AssertIsEqual(oldEval[0], finalPolyEval[0])
 	f.gl.AssertIsEqual(oldEval[1], finalPolyEval[1])

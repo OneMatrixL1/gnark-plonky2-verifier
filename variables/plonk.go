@@ -10,12 +10,15 @@ type OpeningSet struct {
 	PlonkZsNext     []gl.QuadraticExtensionVariable // Length = CommonCircuitData.NumChallenges
 	PartialProducts []gl.QuadraticExtensionVariable // Length = CommonCircuitData.NumChallenges * CommonCircuitData.NumPartialProducts
 	QuotientPolys   []gl.QuadraticExtensionVariable // Length = CommonCircuitData.NumChallenges * CommonCircuitData.QuotientDegreeFactor
+	LookupZs        []gl.QuadraticExtensionVariable // Length = NumChallenges * NumLookupPolys
+	LookupZsNext    []gl.QuadraticExtensionVariable // Length = NumChallenges * NumLookupPolys
 }
 
 type ProofChallenges struct {
 	PlonkBetas    []gl.Variable
 	PlonkGammas   []gl.Variable
 	PlonkAlphas   []gl.Variable
+	PlonkDeltas   []gl.Variable // For lookups (v1.1.0+)
 	PlonkZeta     gl.QuadraticExtensionVariable
 	FriChallenges FriChallenges
 }

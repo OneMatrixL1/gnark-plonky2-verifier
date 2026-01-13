@@ -1,6 +1,9 @@
 package poseidon
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/consensys/gnark/frontend"
 	gl "github.com/succinctlabs/gnark-plonky2-verifier/goldilocks"
 )
@@ -70,6 +73,12 @@ func (c *GoldilocksChip) HashNToMNoPad(input []gl.Variable, nbOutputs int) []gl.
 // The input elements can be outside of the Goldilocks field.
 // The returned slice's elements will all be within Goldilocks field.
 func (c *GoldilocksChip) HashNoPad(input []gl.Variable) GoldilocksHashOut {
+	debugEnabled := os.Getenv("DEBUG_BN254_TRACE") != ""
+
+	if debugEnabled {
+		fmt.Printf("\n[DEBUG] HashNoPad called with %d inputs\n", len(input))
+	}
+
 	var hash GoldilocksHashOut
 	inputVars := []gl.Variable{}
 
@@ -82,11 +91,54 @@ func (c *GoldilocksChip) HashNoPad(input []gl.Variable) GoldilocksHashOut {
 		hash[i] = outputVars[i]
 	}
 
+	if debugEnabled {
+		fmt.Printf("[DEBUG] HashNoPad output: (circuit variables, values not available)\n")
+	}
+
 	return hash
 }
 
 func (c *GoldilocksChip) ToVec(hash GoldilocksHashOut) []gl.Variable {
 	return hash[:]
+}
+
+// HashOrNoop returns the hash of input if len > 4, otherwise pads with zeros.
+// This matches plonky2's hash_or_noop.
+func (c *GoldilocksChip) HashOrNoop(input []gl.Variable) GoldilocksHashOut {
+	if len(input) <= POSEIDON_GL_HASH_SIZE {
+		var result GoldilocksHashOut
+		for i := 0; i < POSEIDON_GL_HASH_SIZE; i++ {
+			if i < len(input) {
+				result[i] = input[i]
+			} else {
+				result[i] = gl.Zero()
+			}
+		}
+		return result
+	}
+	return c.HashNoPad(input)
+}
+
+// TwoToOne computes the merkle tree hash of two child nodes.
+// This matches plonky2's compress function (used by two_to_one).
+func (c *GoldilocksChip) TwoToOne(left GoldilocksHashOut, right GoldilocksHashOut) GoldilocksHashOut {
+	var state GoldilocksState
+	for i := 0; i < SPONGE_WIDTH; i++ {
+		state[i] = gl.Zero()
+	}
+
+	for i := 0; i < POSEIDON_GL_HASH_SIZE; i++ {
+		state[i] = left[i]
+		state[i+POSEIDON_GL_HASH_SIZE] = right[i]
+	}
+
+	state = c.Poseidon(state)
+
+	var result GoldilocksHashOut
+	for i := 0; i < POSEIDON_GL_HASH_SIZE; i++ {
+		result[i] = state[i]
+	}
+	return result
 }
 
 func (c *GoldilocksChip) fullRounds(state GoldilocksState, roundCounter *int) GoldilocksState {

@@ -1,6 +1,7 @@
 package gates
 
 import (
+	"fmt"
 	"regexp"
 
 	"github.com/consensys/gnark/frontend"
@@ -98,6 +99,20 @@ func (g *PoseidonGate) EvalUnfiltered(
 
 	poseidonChip := poseidon.NewGoldilocksChip(api)
 
+	// Debug checkpoint logging
+	enableCheckpointLogging := true
+	logCheckpoint := func(name string, state [poseidon.SPONGE_WIDTH]gl.QuadraticExtensionVariable) {
+		if !enableCheckpointLogging {
+			return
+		}
+		fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("%s\n", name)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		for i := 0; i < poseidon.SPONGE_WIDTH; i++ {
+			fmt.Printf("  state[%d] = [%v, %v]\n", i, state[i][0].Limb, state[i][1].Limb)
+		}
+	}
+
 	// Assert that `swap` is binary.
 	swap := vars.localWires[g.WireSwap()]
 	swapMinusOne := glApi.SubExtension(swap, gl.OneExtension())
@@ -126,11 +141,30 @@ func (g *PoseidonGate) EvalUnfiltered(
 		state[i] = vars.localWires[g.WireInput(i)]
 	}
 
+	// CHECKPOINT 1: After input layer
+	logCheckpoint("CHECKPOINT 1: After Input Layer (with swap logic)", state)
+
 	roundCounter := 0
 
 	// First set of full rounds.
 	for r := uint64(0); r < poseidon.HALF_N_FULL_ROUNDS; r++ {
+		// Log state before this round
+		if enableCheckpointLogging {
+			fmt.Printf("\n[FULL_ROUND_%d] State BEFORE round:\n", r)
+			for i := 0; i < poseidon.SPONGE_WIDTH; i++ {
+				fmt.Printf("  state[%d] = [%v, %v]\n", i, state[i][0].Limb, state[i][1].Limb)
+			}
+		}
+
 		state = poseidonChip.ConstantLayerExtension(state, &roundCounter)
+
+		if enableCheckpointLogging {
+			fmt.Printf("\n[FULL_ROUND_%d] After ConstantLayer:\n", r)
+			for i := 0; i < poseidon.SPONGE_WIDTH; i++ {
+				fmt.Printf("  state[%d] = [%v, %v]\n", i, state[i][0].Limb, state[i][1].Limb)
+			}
+		}
+
 		if r != 0 {
 			for i := uint64(0); i < poseidon.SPONGE_WIDTH; i++ {
 				sBoxIn := vars.localWires[g.WireFullSBox0(r, i)]
@@ -138,10 +172,30 @@ func (g *PoseidonGate) EvalUnfiltered(
 				state[i] = sBoxIn
 			}
 		}
+
 		state = poseidonChip.SBoxLayerExtension(state)
+
+		if enableCheckpointLogging {
+			fmt.Printf("\n[FULL_ROUND_%d] After SBoxLayer:\n", r)
+			for i := 0; i < poseidon.SPONGE_WIDTH; i++ {
+				fmt.Printf("  state[%d] = [%v, %v]\n", i, state[i][0].Limb, state[i][1].Limb)
+			}
+		}
+
 		state = poseidonChip.MdsLayerExtension(state)
+
+		if enableCheckpointLogging {
+			fmt.Printf("\n[FULL_ROUND_%d] After MdsLayer (COMPLETE):\n", r)
+			for i := 0; i < poseidon.SPONGE_WIDTH; i++ {
+				fmt.Printf("  state[%d] = [%v, %v]\n", i, state[i][0].Limb, state[i][1].Limb)
+			}
+		}
+
 		roundCounter++
 	}
+
+	// CHECKPOINT 2: After first full rounds
+	logCheckpoint("CHECKPOINT 2: After First Full Rounds (4 rounds)", state)
 
 	// Partial rounds.
 	state = poseidonChip.PartialFirstConstantLayerExtension(state)
@@ -160,6 +214,9 @@ func (g *PoseidonGate) EvalUnfiltered(
 	state = poseidonChip.MdsPartialLayerFastExtension(state, poseidon.N_PARTIAL_ROUNDS-1)
 	roundCounter += poseidon.N_PARTIAL_ROUNDS
 
+	// CHECKPOINT 3: After partial rounds (THE MIDDLE)
+	logCheckpoint("CHECKPOINT 3: After Partial Rounds (22 rounds) ⭐ MIDDLE", state)
+
 	// Second set of full rounds.
 	for r := uint64(0); r < poseidon.HALF_N_FULL_ROUNDS; r++ {
 		state = poseidonChip.ConstantLayerExtension(state, &roundCounter)
@@ -173,8 +230,23 @@ func (g *PoseidonGate) EvalUnfiltered(
 		roundCounter++
 	}
 
+	// CHECKPOINT 4: After second full rounds
+	logCheckpoint("CHECKPOINT 4: After Second Full Rounds (4 rounds)", state)
+
 	for i := uint64(0); i < poseidon.SPONGE_WIDTH; i++ {
 		constraints = append(constraints, glApi.SubExtension(state[i], vars.localWires[g.WireOutput(i)]))
+	}
+
+	// CHECKPOINT 5: Expected outputs
+	if enableCheckpointLogging {
+		fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("CHECKPOINT 5: Expected Outputs\n")
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		for i := uint64(0); i < poseidon.SPONGE_WIDTH; i++ {
+			output := vars.localWires[g.WireOutput(i)]
+			fmt.Printf("  output[%d] = [%v, %v]\n", i, output[0].Limb, output[1].Limb)
+		}
+		fmt.Printf("\n")
 	}
 
 	return constraints

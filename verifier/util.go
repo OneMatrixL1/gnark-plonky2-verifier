@@ -14,10 +14,11 @@ type ExampleVerifierCircuit struct {
 
 	// This is configuration for the circuit, it is a constant not a variable
 	CommonCircuitData types.CommonCircuitData
+	HashMode          types.HashMode `gnark:"-"`
 }
 
 func (c *ExampleVerifierCircuit) Define(api frontend.API) error {
-	verifierChip := NewVerifierChip(api, c.CommonCircuitData)
+	verifierChip := NewVerifierChip(api, c.CommonCircuitData, c.HashMode)
 	verifierChip.Verify(c.Proof, c.PublicInputs, c.VerifierOnlyCircuitData)
 
 	return nil

@@ -1,0 +1,51 @@
+package main
+
+import (
+	"fmt"
+	"github.com/succinctlabs/gnark-plonky2-verifier/field/goldilocks"
+	"github.com/succinctlabs/gnark-plonky2-verifier/field/extension/quadratic"
+)
+
+func main() {
+	// Final poly coeffs from JSON
+	coeffs := []quadratic.QuadraticExtension[goldilocks.GoldilocksField]{
+		quadratic.NewQuadraticExtension(
+			goldilocks.NewElement(8082935059754729920),
+			goldilocks.NewElement(6688078070280649581),
+		),
+		quadratic.NewQuadraticExtension(
+			goldilocks.NewElement(436257606560490827),
+			goldilocks.NewElement(17280044063052225939),
+		),
+		quadratic.NewQuadraticExtension(
+			goldilocks.NewElement(11558435564024160793),
+			goldilocks.NewElement(11125181265177099877),
+		),
+		quadratic.NewQuadraticExtension(
+			goldilocks.NewElement(0),
+			goldilocks.NewElement(0),
+		),
+	}
+
+	// subgroupX from xIndex=9
+	x := goldilocks.NewElement(4500376003737029734)
+	xQE := quadratic.NewQuadraticExtension(x, goldilocks.NewElement(0))
+
+	// Evaluate polynomial using Horner's method (like finalPolyEval)
+	result := quadratic.NewQuadraticExtension(goldilocks.NewElement(0), goldilocks.NewElement(0))
+	for i := len(coeffs) - 1; i >= 0; i-- {
+		// result = result * x + coeffs[i]
+		result = result.Mul(xQE).Add(coeffs[i])
+	}
+
+	fmt.Println("Coefficients:")
+	for i, c := range coeffs {
+		fmt.Printf("  coeff[%d]: [%v, %v]\n", i, c.A.Uint64(), c.B.Uint64())
+	}
+	fmt.Printf("\nx: %v\n", x.Uint64())
+	fmt.Printf("xQE: [%v, %v]\n", xQE.A.Uint64(), xQE.B.Uint64())
+	fmt.Printf("\nResult: [%v, %v]\n", result.A.Uint64(), result.B.Uint64())
+
+	// Expected from Rust
+	fmt.Printf("\nExpected (from Rust): [898273906043024859, 3230479180035243274]\n")
+}

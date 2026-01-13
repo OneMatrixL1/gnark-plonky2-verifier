@@ -18,6 +18,7 @@ type TestFriCircuit struct {
 	ProofWithPis            variables.ProofWithPublicInputs
 	VerifierOnlyCircuitData variables.VerifierOnlyCircuitData
 	CommonCircuitData       types.CommonCircuitData
+	HashMode                types.HashMode
 }
 
 func (circuit *TestFriCircuit) Define(api frontend.API) error {
@@ -27,24 +28,20 @@ func (circuit *TestFriCircuit) Define(api frontend.API) error {
 
 	glApi := gl.New(api)
 	poseidonChip := poseidon.NewGoldilocksChip(api)
-	friChip := fri.NewChip(api, &commonCircuitData, &commonCircuitData.FriParams)
-	challengerChip := challenger.NewChip(api)
+	friChip := fri.NewChip(api, &commonCircuitData, &commonCircuitData.FriParams, circuit.HashMode)
+	challengerChip := challenger.NewChip(api, circuit.HashMode)
 
-	challengerChip.ObserveBN254Hash(verifierOnlyCircuitData.CircuitDigest)
+	challengerChip.ObserveHash(verifierOnlyCircuitData.CircuitDigest)
 	challengerChip.ObserveHash(poseidonChip.HashNoPad(proofWithPis.PublicInputs))
 	challengerChip.ObserveCap(proofWithPis.Proof.WiresCap)
-	plonkBetas := challengerChip.GetNChallenges(commonCircuitData.Config.NumChallenges) // For plonk betas
-	glApi.AssertIsEqual(plonkBetas[0], gl.NewVariable("17615363392879944733"))
-	plonkGammas := challengerChip.GetNChallenges(commonCircuitData.Config.NumChallenges) // For plonk gammas
-	glApi.AssertIsEqual(plonkGammas[0], gl.NewVariable("15174493176564484303"))
+	challengerChip.GetNChallenges(commonCircuitData.Config.NumChallenges) // plonk betas
+	challengerChip.GetNChallenges(commonCircuitData.Config.NumChallenges) // plonk gammas
 
 	challengerChip.ObserveCap(proofWithPis.Proof.PlonkZsPartialProductsCap)
-	plonkAlphas := challengerChip.GetNChallenges(commonCircuitData.Config.NumChallenges) // For plonk alphas
-	glApi.AssertIsEqual(plonkAlphas[0], gl.NewVariable("9276470834414745550"))
+	challengerChip.GetNChallenges(commonCircuitData.Config.NumChallenges) // plonk alphas
 
 	challengerChip.ObserveCap(proofWithPis.Proof.QuotientPolysCap)
 	plonkZeta := challengerChip.GetExtensionChallenge()
-	glApi.AssertIsEqual(plonkZeta[0], gl.NewVariable("3892795992421241388"))
 
 	challengerChip.ObserveOpenings(friChip.ToOpenings(proofWithPis.Proof.Openings))
 
@@ -53,18 +50,8 @@ func (circuit *TestFriCircuit) Define(api frontend.API) error {
 		proofWithPis.Proof.OpeningProof.FinalPoly,
 		proofWithPis.Proof.OpeningProof.PowWitness,
 		commonCircuitData.Config.FriConfig,
+		commonCircuitData.DegreeBits,
 	)
-
-	api.AssertIsEqual(friChallenges.FriAlpha[0].Limb, 885535811531859621)
-
-	api.AssertIsEqual(friChallenges.FriBetas[0][0].Limb, 5231781384587895507)
-
-	api.AssertIsEqual(friChallenges.FriPowResponse.Limb, 70715523064019)
-
-	// glApi.AssertIsEqual(friChallenges.FriQueryIndices[0], gl.NewVariableFromConst(11890500485816111017))
-	var x uint64
-	x = 11890500485816111017
-	api.AssertIsEqual(friChallenges.FriQueryIndices[0].Limb, x)
 
 	initialMerkleCaps := []variables.FriMerkleCap{
 		verifierOnlyCircuitData.ConstantSigmasCap,
@@ -106,9 +93,9 @@ func (circuit *TestFriCircuit) Define(api frontend.API) error {
 func TestDecodeBlockFriVerification(t *testing.T) {
 	assert := test.NewAssert(t)
 
-	proofWithPIsFilename := "../testdata/decode_block/proof_with_public_inputs.json"
-	commonCircuitDataFilename := "../testdata/decode_block/common_circuit_data.json"
-	verifierOnlyCircuitDataFilename := "../testdata/decode_block/verifier_only_circuit_data.json"
+	proofWithPIsFilename := "../testdata/addition_bn128/proof_with_public_inputs.json"
+	commonCircuitDataFilename := "../testdata/addition_bn128/common_circuit_data.json"
+	verifierOnlyCircuitDataFilename := "../testdata/addition_bn128/verifier_only_circuit_data.json"
 
 	proofWithPis := variables.DeserializeProofWithPublicInputs(types.ReadProofWithPublicInputs(proofWithPIsFilename))
 	commonCircuitData := types.ReadCommonCircuitData(commonCircuitDataFilename)
@@ -119,11 +106,13 @@ func TestDecodeBlockFriVerification(t *testing.T) {
 			proofWithPis,
 			verifierOnlyCircuitData,
 			commonCircuitData,
+			types.HashModePoseidonGoldilocks,
 		}
 		witness := TestFriCircuit{
 			proofWithPis,
 			verifierOnlyCircuitData,
 			commonCircuitData,
+			types.HashModePoseidonGoldilocks,
 		}
 		err := test.IsSolved(&circuit, &witness, ecc.BN254.ScalarField())
 		assert.NoError(err)

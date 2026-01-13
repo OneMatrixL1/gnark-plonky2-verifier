@@ -30,11 +30,18 @@ func runBenchmark(plonky2Circuit string, proofSystem string, profileCircuit bool
 	proofWithPis := variables.DeserializeProofWithPublicInputs(types.ReadProofWithPublicInputs("testdata/" + plonky2Circuit + "/proof_with_public_inputs.json"))
 	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("testdata/" + plonky2Circuit + "/verifier_only_circuit_data.json"))
 
+	// Detect hash mode from circuit name
+	hashMode := types.HashModePoseidonGoldilocks
+	if plonky2Circuit == "addition_bn128" || plonky2Circuit == "step_bn128" {
+		hashMode = types.HashModePoseidonBN254
+	}
+
 	circuit := verifier.ExampleVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
 		PublicInputs:            proofWithPis.PublicInputs,
 		VerifierOnlyCircuitData: verifierOnlyCircuitData,
 		CommonCircuitData:       commonCircuitData,
+		HashMode:                hashMode,
 	}
 
 	var p *profile.Profile
@@ -85,10 +92,17 @@ func plonkProof(r1cs constraint.ConstraintSystem, circuitName string, dummy bool
 
 	proofWithPis := variables.DeserializeProofWithPublicInputs(types.ReadProofWithPublicInputs("testdata/" + circuitName + "/proof_with_public_inputs.json"))
 	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("testdata/" + circuitName + "/verifier_only_circuit_data.json"))
+	commonCircuitData := types.ReadCommonCircuitData("testdata/" + circuitName + "/common_circuit_data.json")
+	hashMode := types.HashModePoseidonGoldilocks
+	if circuitName == "addition_bn128" || circuitName == "step_bn128" {
+		hashMode = types.HashModePoseidonBN254
+	}
 	assignment := verifier.ExampleVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
 		PublicInputs:            proofWithPis.PublicInputs,
 		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		CommonCircuitData:       commonCircuitData,
+		HashMode:                hashMode,
 	}
 
 	// Don't serialize the circuit for now, since it takes up too much memory
@@ -196,10 +210,17 @@ func groth16Proof(r1cs constraint.ConstraintSystem, circuitName string, dummy bo
 
 	proofWithPis := variables.DeserializeProofWithPublicInputs(types.ReadProofWithPublicInputs("testdata/" + circuitName + "/proof_with_public_inputs.json"))
 	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("testdata/" + circuitName + "/verifier_only_circuit_data.json"))
+	commonCircuitData := types.ReadCommonCircuitData("testdata/" + circuitName + "/common_circuit_data.json")
+	hashMode := types.HashModePoseidonGoldilocks
+	if circuitName == "addition_bn128" || circuitName == "step_bn128" {
+		hashMode = types.HashModePoseidonBN254
+	}
 	assignment := verifier.ExampleVerifierCircuit{
 		Proof:                   proofWithPis.Proof,
 		PublicInputs:            proofWithPis.PublicInputs,
 		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		CommonCircuitData:       commonCircuitData,
+		HashMode:                hashMode,
 	}
 	// Don't serialize the circuit for now, since it takes up too much memory
 	// if saveArtifacts {

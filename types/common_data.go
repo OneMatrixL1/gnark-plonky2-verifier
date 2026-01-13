@@ -56,6 +56,9 @@ type CommonCircuitDataRaw struct {
 	NumPublicInputs      uint64   `json:"num_public_inputs"`
 	KIs                  []uint64 `json:"k_is"`
 	NumPartialProducts   uint64   `json:"num_partial_products"`
+	NumLookupPolys       uint64   `json:"num_lookup_polys"`
+	NumLookupSelectors   uint64   `json:"num_lookup_selectors"`
+	Luts                 []any    `json:"luts"`
 }
 
 func ReadCommonCircuitData(path string) CommonCircuitData {
@@ -95,6 +98,38 @@ func ReadCommonCircuitData(path string) CommonCircuitData {
 	commonCircuitData.FriParams.Config.ProofOfWorkBits = raw.FriParams.Config.ProofOfWorkBits
 	commonCircuitData.FriParams.Config.NumQueryRounds = raw.FriParams.Config.NumQueryRounds
 	commonCircuitData.FriParams.ReductionArityBits = raw.FriParams.ReductionArityBits
+	commonCircuitData.FriParams.Hiding = raw.FriParams.Hiding
+
+	// Parse reduction strategy - currently only ConstantArityBits is supported
+	if len(raw.FriParams.Config.ReductionStrategy.ConstantArityBits) == 2 {
+		commonCircuitData.ReductionStrategy = ReductionStrategy{
+			Type:          ReductionStrategyConstantArityBits,
+			ArityBits:     raw.FriParams.Config.ReductionStrategy.ConstantArityBits[0],
+			FinalPolyBits: raw.FriParams.Config.ReductionStrategy.ConstantArityBits[1],
+		}
+	} else {
+		// Default to ConstantArityBits with zeros if not present
+		commonCircuitData.ReductionStrategy = ReductionStrategy{
+			Type:          ReductionStrategyConstantArityBits,
+			ArityBits:     0,
+			FinalPolyBits: 0,
+		}
+	}
+
+	// Parse ReductionStrategy from FriConfig
+	// The JSON format is: {"ConstantArityBits": [arity_bits, final_poly_bits]}
+	if len(raw.FriParams.Config.ReductionStrategy.ConstantArityBits) >= 2 {
+		commonCircuitData.ReductionStrategy = ReductionStrategy{
+			Type:          ReductionStrategyConstantArityBits,
+			ArityBits:     raw.FriParams.Config.ReductionStrategy.ConstantArityBits[0],
+			FinalPolyBits: raw.FriParams.Config.ReductionStrategy.ConstantArityBits[1],
+		}
+	} else if len(raw.FriParams.Config.ReductionStrategy.ConstantArityBits) == 1 {
+		commonCircuitData.ReductionStrategy = ReductionStrategy{
+			Type:      ReductionStrategyConstantArityBits,
+			ArityBits: raw.FriParams.Config.ReductionStrategy.ConstantArityBits[0],
+		}
+	}
 
 	commonCircuitData.GateIds = raw.Gates
 
@@ -117,6 +152,9 @@ func ReadCommonCircuitData(path string) CommonCircuitData {
 	commonCircuitData.NumPublicInputs = raw.NumPublicInputs
 	commonCircuitData.KIs = raw.KIs
 	commonCircuitData.NumPartialProducts = raw.NumPartialProducts
+	commonCircuitData.NumLookupPolys = raw.NumLookupPolys
+	commonCircuitData.NumLookupSelectors = raw.NumLookupSelectors
+	commonCircuitData.Luts = raw.Luts
 
 	// Don't support circuits that have hiding enabled
 	if raw.FriParams.Hiding {

@@ -6,11 +6,51 @@ import (
 	"os"
 )
 
+// HashValue can deserialize from either:
+// - BN128 format: single decimal string "123456789..."
+// - Goldilocks format: array of 4 u64 [u64, u64, u64, u64]
+type HashValue struct {
+	// For BN128: the decimal string representation
+	// For Goldilocks: we convert the 4 u64 array to a string for uniform handling
+	Value string
+	// Raw Goldilocks values (only set if parsed from array format)
+	GoldilocksValues []uint64
+	// True if this was parsed from Goldilocks format
+	IsGoldilocks bool
+}
+
+func (h *HashValue) UnmarshalJSON(data []byte) error {
+	// Try string first (BN128 format)
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		h.Value = str
+		h.IsGoldilocks = false
+		return nil
+	}
+
+	// Try array of 4 u64 (Goldilocks format)
+	var arr []uint64
+	if err := json.Unmarshal(data, &arr); err == nil {
+		h.GoldilocksValues = arr
+		h.IsGoldilocks = true
+		// Store as empty string - the variable deserializer will handle conversion
+		h.Value = ""
+		return nil
+	}
+
+	return json.Unmarshal(data, &str) // Return original error
+}
+
+// String returns the BN128 string value (only valid for BN128 format)
+func (h *HashValue) String() string {
+	return h.Value
+}
+
 type ProofWithPublicInputsRaw struct {
 	Proof struct {
-		WiresCap                  []string `json:"wires_cap"`
-		PlonkZsPartialProductsCap []string `json:"plonk_zs_partial_products_cap"`
-		QuotientPolysCap          []string `json:"quotient_polys_cap"`
+		WiresCap                  []HashValue `json:"wires_cap"`
+		PlonkZsPartialProductsCap []HashValue `json:"plonk_zs_partial_products_cap"`
+		QuotientPolysCap          []HashValue `json:"quotient_polys_cap"`
 		Openings                  struct {
 			Constants       [][]uint64 `json:"constants"`
 			PlonkSigmas     [][]uint64 `json:"plonk_sigmas"`
@@ -19,9 +59,11 @@ type ProofWithPublicInputsRaw struct {
 			PlonkZsNext     [][]uint64 `json:"plonk_zs_next"`
 			PartialProducts [][]uint64 `json:"partial_products"`
 			QuotientPolys   [][]uint64 `json:"quotient_polys"`
+			LookupZs        [][]uint64 `json:"lookup_zs"`
+			LookupZsNext    [][]uint64 `json:"lookup_zs_next"`
 		} `json:"openings"`
 		OpeningProof struct {
-			CommitPhaseMerkleCaps [][]string `json:"commit_phase_merkle_caps"`
+			CommitPhaseMerkleCaps [][]HashValue `json:"commit_phase_merkle_caps"`
 			QueryRoundProofs      []struct {
 				InitialTreesProof struct {
 					EvalsProofs []EvalProofRaw `json:"evals_proofs"`
@@ -29,7 +71,7 @@ type ProofWithPublicInputsRaw struct {
 				Steps []struct {
 					Evals       [][]uint64 `json:"evals"`
 					MerkleProof struct {
-						Siblings []string `json:"siblings"`
+						Siblings []HashValue `json:"siblings"`
 					} `json:"merkle_proof"`
 				} `json:"steps"`
 			} `json:"query_round_proofs"`
@@ -52,20 +94,20 @@ func (e *EvalProofRaw) UnmarshalJSON(data []byte) error {
 }
 
 type MerkleProofRaw struct {
-	Hash []string
+	Hash []HashValue
 }
 
 func (m *MerkleProofRaw) UnmarshalJSON(data []byte) error {
 	type SiblingObject struct {
-		Siblings []string // "siblings"
+		Siblings []HashValue `json:"siblings"`
 	}
 
 	var siblings SiblingObject
 	if err := json.Unmarshal(data, &siblings); err != nil {
-		panic(err)
+		return err
 	}
 
-	m.Hash = make([]string, len(siblings.Siblings))
+	m.Hash = make([]HashValue, len(siblings.Siblings))
 	copy(m.Hash[:], siblings.Siblings)
 
 	return nil
@@ -85,8 +127,8 @@ type ProofChallengesRaw struct {
 }
 
 type VerifierOnlyCircuitDataRaw struct {
-	ConstantsSigmasCap []string `json:"constants_sigmas_cap"`
-	CircuitDigest      string   `json:"circuit_digest"`
+	ConstantsSigmasCap []HashValue `json:"constants_sigmas_cap"`
+	CircuitDigest      HashValue   `json:"circuit_digest"`
 }
 
 func ReadProofWithPublicInputs(path string) ProofWithPublicInputsRaw {

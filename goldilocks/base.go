@@ -19,7 +19,6 @@ import (
 	"math"
 	"math/big"
 	"os"
-	"strconv"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/field/goldilocks"
@@ -30,13 +29,18 @@ import (
 )
 
 // The multiplicative group generator of the field.
-var MULTIPLICATIVE_GROUP_GENERATOR goldilocks.Element = goldilocks.NewElement(7)
+// CRITICAL: Must match plonky2's value (14293326489335486720), NOT 7!
+// Using wrong value causes subgroupX mismatch in FRI verification.
+// See: plonky2/field/src/goldilocks_field.rs:80
+var MULTIPLICATIVE_GROUP_GENERATOR goldilocks.Element = goldilocks.NewElement(14293326489335486720)
 
 // The two adicity of the field.
 var TWO_ADICITY uint64 = 32
 
 // The power of two generator of the field.
-var POWER_OF_TWO_GENERATOR goldilocks.Element = goldilocks.NewElement(1753635133440165772)
+// CRITICAL: Must match plonky2's value (7277203076849721926)
+// See: plonky2/field/src/goldilocks_field.rs:87
+var POWER_OF_TWO_GENERATOR goldilocks.Element = goldilocks.NewElement(7277203076849721926)
 
 // The modulus of the field.
 var MODULUS *big.Int = emulated.Goldilocks{}.Modulus()
@@ -425,10 +429,13 @@ func (p *Chip) checkCollected(api frontend.API) error {
 		panic("checkCollected should only be called when using the commit range checker")
 	}
 
-	nbBits := getOptimalBasewidth(p.api, p.rangeCheckCollected)
-	if nbBits != EXPECTED_OPTIMAL_BASEWIDTH {
-		panic("nbBits should be " + strconv.Itoa(EXPECTED_OPTIMAL_BASEWIDTH))
-	}
+	// CRITICAL FIX: Force basewidth to 16 for gnark commit range checker compatibility
+	// The optimal basewidth calculation often returns smaller values (8-12) which
+	// would be more efficient, but we use 16 to ensure compatibility with the
+	// gnark security fix for pre-0.9.2 versions and maintain alignment with
+	// RANGE_CHECK_NB_BITS (144 = 16 × 9)
+	// See: docs/PLONKY2_V1_1_UPGRADE.md - "Critical Fix: Goldilocks Basewidth"
+	nbBits := EXPECTED_OPTIMAL_BASEWIDTH
 
 	for _, v := range p.rangeCheckCollected {
 		if v.bits%nbBits != 0 {

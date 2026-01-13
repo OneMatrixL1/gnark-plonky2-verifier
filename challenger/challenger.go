@@ -2,6 +2,8 @@ package challenger
 
 import (
 	"fmt"
+	"log"
+	"os"
 
 	"github.com/consensys/gnark/frontend"
 	"github.com/succinctlabs/gnark-plonky2-verifier/fri"
@@ -11,6 +13,9 @@ import (
 	"github.com/succinctlabs/gnark-plonky2-verifier/variables"
 )
 
+var debugBN254Trace = os.Getenv("DEBUG_BN254_TRACE") == "1"
+var debugChallengerState = os.Getenv("DEBUG_CHALLENGER_STATE") == "1"
+
 type Chip struct {
 	api               frontend.API `gnark:"-"`
 	poseidonChip      *poseidon.GoldilocksChip
@@ -18,9 +23,10 @@ type Chip struct {
 	spongeState       poseidon.GoldilocksState
 	inputBuffer       []gl.Variable
 	outputBuffer      []gl.Variable
+	hashMode          types.HashMode `gnark:"-"`
 }
 
-func NewChip(api frontend.API) *Chip {
+func NewChip(api frontend.API, hashMode types.HashMode) *Chip {
 	var spongeState poseidon.GoldilocksState
 	var inputBuffer []gl.Variable
 	var outputBuffer []gl.Variable
@@ -36,6 +42,7 @@ func NewChip(api frontend.API) *Chip {
 		spongeState:       spongeState,
 		inputBuffer:       inputBuffer,
 		outputBuffer:      outputBuffer,
+		hashMode:          hashMode,
 	}
 }
 
@@ -48,6 +55,113 @@ func (c *Chip) ObserveElement(element gl.Variable) {
 	}
 }
 
+// ObserveFriParams observes the FRI parameters for Fiat-Shamir.
+// This must be called before observing circuit_digest in get_challenges.
+// The observation order matches Rust's FriParams::observe:
+//  1. FriConfig: rate_bits, cap_height, proof_of_work_bits, reduction_strategy.serialize(), num_query_rounds
+//  2. hiding (bool as 0 or 1)
+//  3. degree_bits
+//  4. reduction_arity_bits (as elements)
+func (c *Chip) ObserveFriParams(friParams types.FriParams, friConfig types.FriConfig, reductionStrategy types.ReductionStrategy) {
+	debugEnabled := os.Getenv("DEBUG_BN254_TRACE") != ""
+
+	if debugEnabled {
+		fmt.Println("\nObserving FRI params:")
+	}
+
+	// Observe FriConfig fields
+	if debugEnabled {
+		fmt.Printf("  1. rate_bits = %d\n", friConfig.RateBits)
+	}
+	c.ObserveElement(gl.NewVariable(friConfig.RateBits))
+
+	if debugEnabled {
+		fmt.Printf("  2. cap_height = %d\n", friConfig.CapHeight)
+	}
+	c.ObserveElement(gl.NewVariable(friConfig.CapHeight))
+
+	if debugEnabled {
+		fmt.Printf("  3. proof_of_work_bits = %d\n", friConfig.ProofOfWorkBits)
+	}
+	c.ObserveElement(gl.NewVariable(uint64(friConfig.ProofOfWorkBits)))
+
+	// Observe reduction_strategy.serialize()
+	// Format depends on strategy type:
+	// - Fixed: [0, ...arity_bits]
+	// - ConstantArityBits: [1, arity_bits, final_poly_bits]
+	// - MinSize: [2, max_arity_bits]
+	strategyElements := reductionStrategy.Serialize()
+	if debugEnabled {
+		// Determine strategy type from first element
+		if len(strategyElements) > 0 {
+			strategyType := strategyElements[0]
+			var strategyName string
+			switch strategyType {
+			case 0:
+				strategyName = "Fixed"
+			case 1:
+				strategyName = "ConstantArityBits"
+			case 2:
+				strategyName = "MinSize"
+			default:
+				strategyName = "Unknown"
+			}
+			fmt.Printf("  4. reduction_strategy type = %d (%s)\n", strategyType, strategyName)
+
+			// Print additional strategy fields
+			for i := 1; i < len(strategyElements); i++ {
+				var fieldName string
+				if strategyType == 1 { // ConstantArityBits
+					if i == 1 {
+						fieldName = "arity_bits"
+					} else if i == 2 {
+						fieldName = "final_poly_bits"
+					}
+				}
+				fmt.Printf("  %d. reduction_strategy %s = %d\n", i+4, fieldName, strategyElements[i])
+			}
+		}
+	}
+	for _, elem := range strategyElements {
+		c.ObserveElement(gl.NewVariable(elem))
+	}
+
+	if debugEnabled {
+		fmt.Printf("  7. num_query_rounds = %d\n", friConfig.NumQueryRounds)
+	}
+	c.ObserveElement(gl.NewVariable(friConfig.NumQueryRounds))
+
+	// Observe FriParams fields
+	var hidingValue uint64 = 0
+	if friParams.Hiding {
+		hidingValue = 1
+	}
+	if debugEnabled {
+		fmt.Printf("  8. hiding = %d\n", hidingValue)
+	}
+	c.ObserveElement(gl.NewVariable(hidingValue))
+
+	if debugEnabled {
+		fmt.Printf("  9. degree_bits = %d\n", friParams.DegreeBits)
+	}
+	c.ObserveElement(gl.NewVariable(friParams.DegreeBits))
+
+	// Observe reduction_arity_bits
+	if debugEnabled && len(friParams.ReductionArityBits) > 0 {
+		fmt.Println("  10+. reduction_arity_bits:")
+		for i, arityBits := range friParams.ReductionArityBits {
+			fmt.Printf("    [%d] = %d\n", i, arityBits)
+		}
+	}
+	for _, arityBits := range friParams.ReductionArityBits {
+		c.ObserveElement(gl.NewVariable(arityBits))
+	}
+
+	if debugEnabled {
+		fmt.Println("\n✅ FRI params observed")
+	}
+}
+
 func (c *Chip) ObserveElements(elements []gl.Variable) {
 	for i := 0; i < len(elements); i++ {
 		c.ObserveElement(elements[i])
@@ -55,8 +169,18 @@ func (c *Chip) ObserveElements(elements []gl.Variable) {
 }
 
 func (c *Chip) ObserveHash(hash poseidon.GoldilocksHashOut) {
+	if debugChallengerState {
+		fmt.Printf("[CHALLENGER] Before ObserveHash: spongeState[0:4]=[%v,%v,%v,%v]\n",
+			c.spongeState[0].Limb, c.spongeState[1].Limb, c.spongeState[2].Limb, c.spongeState[3].Limb)
+		fmt.Printf("[CHALLENGER] Observing hash: [%v,%v,%v,%v]\n",
+			hash[0].Limb, hash[1].Limb, hash[2].Limb, hash[3].Limb)
+	}
 	elements := c.poseidonChip.ToVec(hash)
 	c.ObserveElements(elements)
+	if debugChallengerState {
+		fmt.Printf("[CHALLENGER] After ObserveHash: spongeState[0:4]=[%v,%v,%v,%v]\n",
+			c.spongeState[0].Limb, c.spongeState[1].Limb, c.spongeState[2].Limb, c.spongeState[3].Limb)
+	}
 }
 
 func (c *Chip) ObserveBN254Hash(hash poseidon.BN254HashOut) {
@@ -64,9 +188,36 @@ func (c *Chip) ObserveBN254Hash(hash poseidon.BN254HashOut) {
 	c.ObserveElements(elements)
 }
 
-func (c *Chip) ObserveCap(cap []poseidon.BN254HashOut) {
+// ObserveHashFromChunks observes a hash that's stored as 4 u64 chunks (BN254 mode wire format)
+// Reconstructs the BN254 field element and observes it properly
+func (c *Chip) ObserveHashFromChunks(chunks poseidon.GoldilocksHashOut) {
+	log.Println("[ObserveHashFromChunks] CALLED - Converting 4 chunks to BN254 to 5 Goldilocks elements")
+
+	// Reconstruct BN254 field element from 4 u64 chunks
+	var allBits []frontend.Variable
+	for i := 0; i < 4; i++ {
+		chunkBits := c.api.ToBinary(chunks[i].Limb, 64)
+		allBits = append(allBits, chunkBits...)
+	}
+
+	bn254Hash := c.api.FromBinary(allBits...)
+	c.ObserveBN254Hash(bn254Hash)
+
+	log.Println("[ObserveHashFromChunks] DONE - BN254 hash observed via ToVec (should be 5 elements)")
+}
+
+func (c *Chip) ObserveCap(cap []poseidon.GoldilocksHashOut) {
 	for i := 0; i < len(cap); i++ {
-		c.ObserveBN254Hash(cap[i])
+		if debugBN254Trace {
+			fmt.Printf("ObserveCap[%d]: %v\n", i, cap[i])
+		}
+		c.ObserveHash(cap[i])
+	}
+}
+
+func (c *Chip) ObserveCapBN254(cap []poseidon.GoldilocksHashOut) {
+	for i := 0; i < len(cap); i++ {
+		c.ObserveHashFromChunks(cap[i])
 	}
 }
 
@@ -106,7 +257,17 @@ func (c *Chip) GetNChallenges(n uint64) []gl.Variable {
 }
 
 func (c *Chip) GetExtensionChallenge() gl.QuadraticExtensionVariable {
+	if debugChallengerState {
+		fmt.Printf("[CHALLENGER] Before GetExtensionChallenge: spongeState[0:4]=[%v,%v,%v,%v]\n",
+			c.spongeState[0].Limb, c.spongeState[1].Limb, c.spongeState[2].Limb, c.spongeState[3].Limb)
+		fmt.Printf("[CHALLENGER] outputBuffer len=%d\n", len(c.outputBuffer))
+	}
 	values := c.GetNChallenges(2)
+	if debugChallengerState {
+		fmt.Printf("[CHALLENGER] After GetExtensionChallenge: result=[%v,%v]\n", values[0].Limb, values[1].Limb)
+		fmt.Printf("[CHALLENGER] After GetExtensionChallenge: spongeState[0:4]=[%v,%v,%v,%v]\n",
+			c.spongeState[0].Limb, c.spongeState[1].Limb, c.spongeState[2].Limb, c.spongeState[3].Limb)
+	}
 	return gl.QuadraticExtensionVariable{values[0], values[1]}
 }
 
@@ -119,13 +280,19 @@ func (c *Chip) GetFriChallenges(
 	finalPoly variables.PolynomialCoeffs,
 	powWitness gl.Variable,
 	config types.FriConfig,
+	degreeBits uint64,
 ) variables.FriChallenges {
 	numFriQueries := config.NumQueryRounds
 	friAlpha := c.GetExtensionChallenge()
 
 	var friBetas []gl.QuadraticExtensionVariable
 	for i := 0; i < len(commitPhaseMerkleCaps); i++ {
-		c.ObserveCap(commitPhaseMerkleCaps[i])
+		// Use BN254 mode observation if hash mode is BN254
+		if c.hashMode == types.HashModePoseidonBN254 {
+			c.ObserveCapBN254(commitPhaseMerkleCaps[i])
+		} else {
+			c.ObserveCap(commitPhaseMerkleCaps[i])
+		}
 		friBetas = append(friBetas, c.GetExtensionChallenge())
 	}
 

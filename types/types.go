@@ -4,14 +4,48 @@ import (
 	"github.com/succinctlabs/gnark-plonky2-verifier/plonk/gates"
 )
 
+// ReductionStrategyType represents the FRI reduction strategy enum
+type ReductionStrategyType int
+
+const (
+	ReductionStrategyFixed ReductionStrategyType = iota
+	ReductionStrategyConstantArityBits
+	ReductionStrategyMinSize
+)
+
+// ReductionStrategy represents the FRI reduction strategy with its parameters
+type ReductionStrategy struct {
+	Type          ReductionStrategyType
+	ArityBits     uint64   // For ConstantArityBits: the arity
+	FinalPolyBits uint64   // For ConstantArityBits: final poly bits
+	MaxArityBits  uint64   // For MinSize: optional max arity
+	Fixed         []uint64 // For Fixed: the exact arity sequence
+}
+
+// Serialize returns the serialized form of the reduction strategy as used in challenger
+// - Fixed: [0, ...arity_bits]
+// - ConstantArityBits: [1, arity_bits, final_poly_bits]
+// - MinSize: [2, max_arity_bits]
+func (r *ReductionStrategy) Serialize() []uint64 {
+	switch r.Type {
+	case ReductionStrategyFixed:
+		result := []uint64{0}
+		result = append(result, r.Fixed...)
+		return result
+	case ReductionStrategyConstantArityBits:
+		return []uint64{1, r.ArityBits, r.FinalPolyBits}
+	case ReductionStrategyMinSize:
+		return []uint64{2, r.MaxArityBits}
+	default:
+		panic("unknown reduction strategy type")
+	}
+}
+
 type FriConfig struct {
 	RateBits        uint64
 	CapHeight       uint64
 	ProofOfWorkBits uint64
 	NumQueryRounds  uint64
-	// Note that we do not need `reduction_strategy` of type FriReductionStrategy as the plonky2 FriConfig has.
-	// reduction_strategy is only used for computing `reduction_arity_bits`, which is serialized in the
-	// CommonCircuitData.
 }
 
 func (fc *FriConfig) Rate() float64 {
@@ -74,6 +108,7 @@ type CircuitConfig struct {
 type CommonCircuitData struct {
 	Config CircuitConfig
 	FriParams
+	ReductionStrategy    ReductionStrategy // Needed for challenger FRI params observation
 	GateIds              []string
 	SelectorsInfo        gates.SelectorsInfo
 	DegreeBits           uint64
@@ -83,4 +118,7 @@ type CommonCircuitData struct {
 	NumPublicInputs      uint64
 	KIs                  []uint64
 	NumPartialProducts   uint64
+	NumLookupPolys       uint64 // For lookups (v1.1.0+)
+	NumLookupSelectors   uint64 // For lookups (v1.1.0+)
+	Luts                 []any  // Placeholder storage for LUT metadata
 }

@@ -28,19 +28,29 @@ func StrArrayToFrontendVariableArray(input []string) []frontend.Variable {
 func Uint64ArrayToVariableArray(input []uint64) []Variable {
 	var output []Variable
 	for i := 0; i < len(input); i++ {
-		output = append(output, NewVariable(input[i]))
+		// Reduce value mod Goldilocks modulus at deserialization time
+		// This matches Rust's GoldilocksField::from_canonical_u64 behavior
+		// and avoids expensive in-circuit reduction
+		val := input[i] % MODULUS.Uint64()
+		output = append(output, NewVariable(val))
 	}
 	return output
 }
 
 func Uint64ArrayToQuadraticExtension(input []uint64) QuadraticExtensionVariable {
-	return NewQuadraticExtensionVariable(NewVariable(input[0]), NewVariable(input[1]))
+	// Reduce values mod Goldilocks modulus at deserialization time
+	val0 := input[0] % MODULUS.Uint64()
+	val1 := input[1] % MODULUS.Uint64()
+	return NewQuadraticExtensionVariable(NewVariable(val0), NewVariable(val1))
 }
 
 func Uint64ArrayToQuadraticExtensionArray(input [][]uint64) []QuadraticExtensionVariable {
 	var output []QuadraticExtensionVariable
 	for i := 0; i < len(input); i++ {
-		output = append(output, NewQuadraticExtensionVariable(NewVariable(input[i][0]), NewVariable(input[i][1])))
+		// Reduce values mod Goldilocks modulus at deserialization time
+		val0 := input[i][0] % MODULUS.Uint64()
+		val1 := input[i][1] % MODULUS.Uint64()
+		output = append(output, NewQuadraticExtensionVariable(NewVariable(val0), NewVariable(val1)))
 	}
 	return output
 }

@@ -64,6 +64,8 @@ func (c *BN254Chip) HashNoPad(input []gl.Variable) BN254HashOut {
 
 			inter := frontend.Variable(0)
 			for k := 0; k < len(bn254Chunk); k++ {
+				// Note: Values are already reduced mod Goldilocks modulus at deserialization time
+				// See goldilocks/utils.go Uint64ArrayToVariableArray
 				inter = c.api.MulAcc(inter, bn254Chunk[k].Limb, new(big.Int).Exp(two_to_64, big.NewInt(int64(k)), nil))
 			}
 
@@ -83,6 +85,8 @@ func (c *BN254Chip) HashOrNoop(input []gl.Variable) BN254HashOut {
 		alpha := new(big.Int).SetInt64(1 << 32)
 		alpha = new(big.Int).Mul(alpha, alpha)
 		for i, inputElement := range input {
+			// Note: Values are already reduced mod Goldilocks modulus at deserialization time
+			// See goldilocks/utils.go Uint64ArrayToVariableArray
 			mulFactor := new(big.Int).Exp(alpha, big.NewInt(int64(i)), nil)
 			returnVal = c.api.MulAcc(returnVal, inputElement.Limb, mulFactor)
 		}

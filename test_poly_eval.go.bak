@@ -1,0 +1,40 @@
+package main
+
+import (
+	"fmt"
+	gl "github.com/succinctlabs/gnark-plonky2-verifier/goldilocks"
+)
+
+func main() {
+	// Final poly coeffs from JSON
+	coeffs := []gl.QuadraticExtensionVariable{
+		{gl.NewVariable(8082935059754729920), gl.NewVariable(6688078070280649581)},
+		{gl.NewVariable(436257606560490827), gl.NewVariable(17280044063052225939)},
+		{gl.NewVariable(11558435564024160793), gl.NewVariable(11125181265177099877)},
+		{gl.NewVariable(0), gl.NewVariable(0)},
+	}
+
+	// subgroupX from xIndex=9
+	x := gl.NewVariable(4500376003737029734)
+	xQE := x.ToQuadraticExtension()
+
+	// Evaluate polynomial using Horner's method (like finalPolyEval)
+	result := gl.ZeroExtension()
+	for i := len(coeffs) - 1; i >= 0; i-- {
+		// result = result * x + coeffs[i]
+		result0 := result[0].Limb*xQE[0].Limb - result[1].Limb*xQE[1].Limb + coeffs[i][0].Limb
+		result1 := result[0].Limb*xQE[1].Limb + result[1].Limb*xQE[0].Limb + coeffs[i][1].Limb
+		result = gl.QuadraticExtensionVariable{gl.NewVariable(result0), gl.NewVariable(result1)}
+	}
+
+	fmt.Println("Coefficients:")
+	for i, c := range coeffs {
+		fmt.Printf("  coeff[%d]: [%v, %v]\n", i, c[0].Limb, c[1].Limb)
+	}
+	fmt.Printf("\nx: %v\n", x.Limb)
+	fmt.Printf("xQE: [%v, %v]\n", xQE[0].Limb, xQE[1].Limb)
+	fmt.Printf("\nResult: [%v, %v]\n", result[0].Limb, result[1].Limb)
+
+	// Expected from Rust
+	fmt.Printf("\nExpected (from Rust): [898273906043024859, 3230479180035243274]\n")
+}
