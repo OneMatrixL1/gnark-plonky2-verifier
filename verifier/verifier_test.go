@@ -140,3 +140,36 @@ func TestRecursiveVerifier_BN254_Wrapped(t *testing.T) {
 	err := test.IsSolved(&circuit, &witness, ecc.BN254.ScalarField())
 	assert.NoError(err)
 }
+
+// TestUniversalBatchVerifier_BN254 tests verification of universal batch aggregator proof
+// Uses testdata/universal_batch/ with BN254 Poseidon (native, ~5M constraints)
+// This proof batches multiple operator proofs with circuit_digest exposed as public inputs
+// Public input layout: [batch_commitment (4), digest_0 (4), inputs_0 (12), digest_1 (4), inputs_1 (12), ...]
+func TestUniversalBatchVerifier_BN254(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	plonky2Circuit := "universal_batch"
+	commonCircuitData := types.ReadCommonCircuitData("../testdata/" + plonky2Circuit + "/common_circuit_data.json")
+
+	proofWithPis := variables.DeserializeProofWithPublicInputs(types.ReadProofWithPublicInputs("../testdata/" + plonky2Circuit + "/proof_with_public_inputs.json"))
+	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("../testdata/" + plonky2Circuit + "/verifier_only_circuit_data.json"))
+
+	circuit := verifier.ExampleVerifierCircuit{
+		Proof:                   proofWithPis.Proof,
+		PublicInputs:            proofWithPis.PublicInputs,
+		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		CommonCircuitData:       commonCircuitData,
+		HashMode:                types.HashModePoseidonBN254,
+	}
+
+	witness := verifier.ExampleVerifierCircuit{
+		Proof:                   proofWithPis.Proof,
+		PublicInputs:            proofWithPis.PublicInputs,
+		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		CommonCircuitData:       commonCircuitData,
+		HashMode:                types.HashModePoseidonBN254,
+	}
+
+	err := test.IsSolved(&circuit, &witness, ecc.BN254.ScalarField())
+	assert.NoError(err)
+}
