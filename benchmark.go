@@ -31,8 +31,16 @@ func runBenchmark(plonky2Circuit string, proofSystem string, profileCircuit bool
 	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("testdata/" + plonky2Circuit + "/verifier_only_circuit_data.json"))
 
 	// Detect hash mode from circuit name
+	// All folded proofs use BN254 Poseidon (wrapped with BN128)
 	hashMode := types.HashModePoseidonGoldilocks
-	if plonky2Circuit == "addition_bn128" || plonky2Circuit == "step_bn128" {
+	if plonky2Circuit == "addition_bn128" || plonky2Circuit == "step_bn128" ||
+		plonky2Circuit == "folded_batch" || plonky2Circuit == "universal_batch" ||
+		plonky2Circuit == "recursive_bn128_wrapped" || plonky2Circuit == "fold_5_ops" ||
+		plonky2Circuit == "fold_scenario_a" || plonky2Circuit == "fold_scenario_b" ||
+		plonky2Circuit == "fold_scenario_c" || plonky2Circuit == "security_test" ||
+		plonky2Circuit == "fold_1024_elements" ||
+		// Generic: any circuit starting with "fold_" uses BN254
+		(len(plonky2Circuit) > 5 && plonky2Circuit[:5] == "fold_") {
 		hashMode = types.HashModePoseidonBN254
 	}
 
@@ -94,7 +102,9 @@ func plonkProof(r1cs constraint.ConstraintSystem, circuitName string, dummy bool
 	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("testdata/" + circuitName + "/verifier_only_circuit_data.json"))
 	commonCircuitData := types.ReadCommonCircuitData("testdata/" + circuitName + "/common_circuit_data.json")
 	hashMode := types.HashModePoseidonGoldilocks
-	if circuitName == "addition_bn128" || circuitName == "step_bn128" {
+	if circuitName == "addition_bn128" || circuitName == "step_bn128" ||
+		circuitName == "folded_batch" || circuitName == "universal_batch" ||
+		circuitName == "recursive_bn128_wrapped" || circuitName == "fold_5_ops" {
 		hashMode = types.HashModePoseidonBN254
 	}
 	assignment := verifier.ExampleVerifierCircuit{
@@ -212,7 +222,9 @@ func groth16Proof(r1cs constraint.ConstraintSystem, circuitName string, dummy bo
 	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(types.ReadVerifierOnlyCircuitData("testdata/" + circuitName + "/verifier_only_circuit_data.json"))
 	commonCircuitData := types.ReadCommonCircuitData("testdata/" + circuitName + "/common_circuit_data.json")
 	hashMode := types.HashModePoseidonGoldilocks
-	if circuitName == "addition_bn128" || circuitName == "step_bn128" {
+	if circuitName == "addition_bn128" || circuitName == "step_bn128" ||
+		circuitName == "folded_batch" || circuitName == "universal_batch" ||
+		circuitName == "recursive_bn128_wrapped" || circuitName == "fold_5_ops" {
 		hashMode = types.HashModePoseidonBN254
 	}
 	assignment := verifier.ExampleVerifierCircuit{
